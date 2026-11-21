@@ -60,7 +60,7 @@ worker-reset: ## Restart the worker with default settings
 	$(COMPOSE) up -d --no-deps --force-recreate worker
 
 queues: ## Show queue depths, including the dead-letter queues
-	$(COMPOSE) exec rabbitmq rabbitmqctl list_queues name type messages
+	$(COMPOSE) exec -T rabbitmq rabbitmqctl list_queues name type messages
 
 # ---------------------------------------------------------------- local dev (needs uv)
 fmt: ## Format and auto-fix locally
