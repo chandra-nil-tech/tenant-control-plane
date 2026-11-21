@@ -9,24 +9,46 @@ A control plane that records tenants and drives their asynchronous lifecycle
 
 ## Setup
 
-Requirements: Docker (with Compose v2), `make`, `curl`.
+Requirements: Docker (Desktop or Engine, with Compose v2, running), `make`, `curl`.
+The command runner is `make`. Everything else (PostgreSQL, RabbitMQ, migrations, the API and
+the worker) runs in containers started by the boot command.
 
 ```bash
-git clone <this-repo> && cd tenant-control-plane
-make up      # builds & boots postgres, rabbitmq, migrations, api, worker; waits until ready
-make test    # runs the full test suite in Docker (its own throwaway postgres + rabbitmq)
+git clone https://github.com/chandra-nil-tech/tenant-control-plane.git && cd tenant-control-plane
+make up      # single command: builds & boots everything, waits until the API is ready
+make test    # single command: runs the full test suite (in Docker, on its own postgres + rabbitmq)
 ```
 
-Then:
+`make check` runs every quality gate (format, lint, types, security scan, tests + coverage).
+`make help` lists all commands.
+
+### Watch a tenant walk its lifecycle
+
+After `make up`, no manual steps are needed: the worker simulator picks up the task by itself.
 
 ```bash
-make demo    # creates a tenant and shows it go provisioning -> active
+make demo    # creates a tenant and polls it until it is active
 ```
 
-- API docs (OpenAPI): http://localhost:8000/docs
+Or with plain `curl`:
+
+```bash
+curl -s -X POST localhost:8000/v1/tenants -H 'content-type: application/json' \
+  -d '{"slug": "acme-corp", "name": "Acme Corp"}'
+# -> 201: tenant "provisioning" (version 1), task "deploy" "accepted". Copy the two ids.
+
+curl -s localhost:8000/v1/tenants/<tenant_id>          # provisioning -> active (version 2)
+curl -s localhost:8000/v1/tenants/<tenant_id>/tasks    # deploy: accepted -> in_progress -> done
+curl -s localhost:8000/v1/tasks/<task_id>              # the same task on its own
+```
+
+By default each worker step takes 0.5–2 s. To watch `in_progress` comfortably, run
+`make worker-slow` first (5–10 s per step) and `make worker-reset` afterwards.
+
+- API docs (OpenAPI, try every endpoint in the browser): http://localhost:8000/docs
 - RabbitMQ UI: http://localhost:15672 (guest / guest)
 
-`make check` runs all quality gates. `make help` lists every command.
+`make down` stops the stack and keeps the data; `make clean` also deletes it.
 
 ---
 
