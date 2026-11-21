@@ -108,18 +108,18 @@ sequenceDiagram
     participant U as Consumer
 
     C->>API: POST /v1/tenants {slug, name}
-    API->>DB: BEGIN; INSERT tenant ON CONFLICT DO NOTHING;<br/>INSERT task (accepted); INSERT outbox row; COMMIT
+    API->>DB: BEGIN, INSERT tenant ON CONFLICT DO NOTHING,<br/>INSERT task (accepted), INSERT outbox row, COMMIT
     API-->>C: 201 {tenant: provisioning, task: accepted}
     R->>DB: SELECT unpublished outbox rows FOR UPDATE SKIP LOCKED
     R->>MQ: publish task (wait for publisher confirm)
-    R->>DB: mark published; COMMIT
+    R->>DB: mark published, COMMIT
     MQ->>W: task
     W->>MQ: in_progress
     MQ->>U: in_progress
-    U->>DB: lock task; record message_id; task → in_progress
+    U->>DB: lock task, record message_id, task → in_progress
     W->>MQ: done
     MQ->>U: done
-    U->>DB: lock task; record message_id; task → done;<br/>tenant → active, version + 1
+    U->>DB: lock task, record message_id, task → done,<br/>tenant → active (version + 1)
 ```
 
 ---
