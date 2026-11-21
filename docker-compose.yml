@@ -1,0 +1,144 @@
+# `make up` boots: postgres, rabbitmq, migrate (one-shot), api, worker.
+# `make test` additionally uses the `test` profile, which brings its OWN throwaway
+# postgres (tmpfs) and rabbitmq, so tests never touch - or race with - the demo stack.
+#
+# Credentials below are local-development defaults (overridable via env vars);
+# nothing here is a real secret.
+
+name: tenant-control-plane
+
+x-app-image: &app-image
+  image: tenant-control-plane:local
+  build:
+    context: .
+    target: runtime
+
+x-app-env: &app-env
+  CP_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-control_plane}:${POSTGRES_PASSWORD:-control_plane}@postgres:5432/control_plane
+  CP_RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
+  CP_LOG_LEVEL: ${CP_LOG_LEVEL:-INFO}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-control_plane}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-control_plane}
+      POSTGRES_DB: control_plane
+    volumes:
+      - pgdata:/var/lib/postgresql/data   # tenants survive restarts
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d control_plane"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  rabbitmq:
+    image: rabbitmq:4.1-management-alpine
+    # RabbitMQ keys its data directory by node name (rabbit@<hostname>); a fixed
+    # hostname keeps durable queues and their messages across container re-creation.
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    ports:
+      - "15672:15672"   # management UI + HTTP API (used by scripts/publish_update.sh)
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
+
+  migrate:
+    <<: *app-image
+    command: ["alembic", "upgrade", "head"]
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *app-image
+    command: ["control-plane"]
+    environment: *app-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/readyz', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  worker:
+    <<: *app-image
+    command: ["worker-sim"]
+    # Scenario knobs: change them and re-create the container (see Makefile:
+    # make worker-fail / worker-chaos / worker-slow / worker-reset).
+    environment:
+      WORKER_RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
+      WORKER_FAIL_RATE: ${WORKER_FAIL_RATE:-0}
+      WORKER_MIN_DELAY_MS: ${WORKER_MIN_DELAY_MS:-500}
+      WORKER_MAX_DELAY_MS: ${WORKER_MAX_DELAY_MS:-2000}
+      WORKER_DUPLICATE_RATE: ${WORKER_DUPLICATE_RATE:-0}
+      WORKER_OUT_OF_ORDER: ${WORKER_OUT_OF_ORDER:-false}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ tests only
+  postgres-test:
+    image: postgres:16-alpine
+    profiles: ["test"]
+    environment:
+      POSTGRES_USER: control_plane
+      POSTGRES_PASSWORD: control_plane
+      POSTGRES_DB: control_plane_test
+    tmpfs:
+      - /var/lib/postgresql/data   # throwaway and fast
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U control_plane -d control_plane_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  rabbitmq-test:
+    image: rabbitmq:4.1-management-alpine
+    profiles: ["test"]
+    hostname: rabbitmq-test
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
+
+  test:
+    image: tenant-control-plane:test
+    build:
+      context: .
+      target: test
+    profiles: ["test"]
+    environment:
+      CP_TEST_DATABASE_URL: postgresql+asyncpg://control_plane:control_plane@postgres-test:5432/control_plane_test
+      CP_TEST_RABBITMQ_URL: amqp://guest:guest@rabbitmq-test:5672/
+      CP_REQUIRE_BROKER: "1"   # in CI the broker tests must run, never skip
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+      rabbitmq-test:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  rabbitmq-data:
