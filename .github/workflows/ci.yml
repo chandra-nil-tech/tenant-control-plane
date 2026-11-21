@@ -1,0 +1,36 @@
+# Runs the reviewers' exact flow on a clean machine, on every push:
+# boot with one command, watch a tenant go live, survive a restart, race, then all gates.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  reviewer-flow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Boot everything (make up)
+        run: make up
+
+      - name: A new tenant reaches active with no manual steps (make demo)
+        run: make demo | tee demo.log && grep -q '"status":"active"' demo.log
+
+      - name: Tenants survive a restart
+        run: |
+          ID=$(curl -fsS 'localhost:8000/v1/tenants?limit=1' | python3 -c 'import sys,json; print(json.load(sys.stdin)["items"][0]["id"])')
+          make restart
+          curl -fsS "localhost:8000/v1/tenants/$ID"
+
+      - name: Concurrent requests have exactly one winner (make race)
+        run: make race
+
+      - name: Quality gates and full test suite (make check)
+        run: make check
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --no-color
